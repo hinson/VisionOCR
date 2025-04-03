@@ -1,0 +1,11 @@
+[project]
+name = "VisionOCR"
+authors = [{ name = "hinson" }]
+version = "0.1.0"
+requires-python = ">=3.9"
+
+dependencies = ["requests", "aiohttp"]
+license = "MIT"
+
+[project.optional-dependencies]
+server = ["pyobjc", "fastapi", "uvicorn", "python-multipart"]

@@ -1,0 +1,6 @@
+requests
+aiohttp
+fastapi
+uvicorn
+python-multipart
+pyobjc
