@@ -89,3 +89,43 @@ async def example_async_usage():
 
 asyncio.run(example_async_usage())
 ```
+
+### 2.3. 表格识别 Document / Table OCR
+
+`POST /ocr/document` 基于 macOS 26+ 的 `RecognizeDocumentsRequest`，识别整页文档结构（标题、段落、列表、表格，支持合并单元格），并通过版面分析提取文档内嵌图片，返回 ZIP 打包产物：
+
+```
+document.json        # 结构化数据（blocks + 表格 cells + 内嵌图片区域坐标）
+document.md          # 整页文档 Markdown（表格用 HTML 语法保真合并单元格，引用内嵌图片）
+images/image_000.png # 文档中检测到的内嵌图片（无内嵌图片时无该目录）
+```
+
+环境要求：服务端 macOS 26+，且已安装 Xcode 或 Command Line Tools（首次请求时自动用 swiftc 编译内置的 Swift 垫片并缓存到 `~/.cache/vision_ocr/`）。
+
+`lang` 参数使用 BCP-47 格式（如 `zh-Hans`、`en-US`），旧式代码 `zh-cn`/`zh-tw` 会自动映射。`document.json` 的 `blocks` 按阅读序排列，`kind` 取值：`paragraph`（正文行）、`list`（列表项）、`table`（表格，`cells` 含 `row_span`/`col_span` 合并信息）、`image`（内嵌图片区域），文本类 block 均带 `bbox` 像素坐标（top-left 原点）。
+
+内嵌图片提取为启发式版面分析（文字/表格掩码外的彩色连通域），对白底文档中的照片、图表效果较好；灰度照片会漏检，检测阈值可在 `vision_ocr/layout.py` 顶部按文档类型调整。
+
+#### 2.3.1. requests
+```python
+import requests
+
+url = "http://localhost:9394/ocr/document?lang=zh-Hans"
+
+with open("table.png", "rb") as f:
+    response = requests.post(url, files={"file": f})
+
+with open("doc.zip", "wb") as f:
+    f.write(response.content)
+```
+
+#### 2.3.2. vision_ocr
+```python
+from vision_ocr import OCRClient, DocumentOCRResult
+
+with OCRClient(base_url="http://localhost:9394", lang="zh-Hans") as client:
+    result: DocumentOCRResult = client.recognize_document("table.png")
+    if result.success:
+        # 将产物解包到本地目录（document.json / document.md / images/）
+        result.save_to("./output")
+```
