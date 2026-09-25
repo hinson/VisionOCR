@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, List, Optional, Union
@@ -22,6 +23,27 @@ class OCRResult:
     error: Optional[str] = None
     processing_time: Optional[float] = None
     file_name: Optional[str] = None
+
+
+@dataclass
+class DocumentOCRResult:
+    """Document OCR result holding the zipped artifacts (json / markdown / images)"""
+
+    success: bool
+    error: Optional[str] = None
+    processing_time: Optional[float] = None
+    file_name: Optional[str] = None
+    zip_data: Optional[bytes] = None
+
+    def save_to(self, dest: Union[str, Path]) -> Path:
+        """Extract the artifact ZIP into dest (created if missing) and return dest."""
+        if self.zip_data is None:
+            raise ValueError("no zip_data available; check success/error first")
+        dest_path = Path(dest)
+        dest_path.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(self.zip_data)) as archive:
+            archive.extractall(dest_path)
+        return dest_path
 
 
 class OCRClient:
@@ -96,7 +118,10 @@ class OCRClient:
             self._loop = None
 
     async def _make_request(
-        self, image_data: Union[bytes, BinaryIO], file_name: Optional[str] = None, attempt: int = 1
+        self,
+        image_data: Union[bytes, BinaryIO],
+        file_name: Optional[str] = None,
+        attempt: int = 1,
     ) -> OCRResult:
         """
         Internal method to make a single OCR request with retries.
@@ -142,7 +167,9 @@ class OCRClient:
         except Exception as e:
             result.error = str(e)
             if attempt <= self.retries:
-                logger.warning(f"Attempt {attempt} failed for {file_name or 'image'}. Retrying...")
+                logger.warning(
+                    f"Attempt {attempt} failed for {file_name or 'image'}. Retrying..."
+                )
                 await asyncio.sleep(1 * attempt)  # Exponential backoff would be better
                 return await self._make_request(image_data, file_name, attempt + 1)
 
@@ -163,7 +190,9 @@ class OCRClient:
             OCRResult object with the recognition results
         """
         if not self._session:
-            raise RuntimeError("Client session not initialized. Use async context manager.")
+            raise RuntimeError(
+                "Client session not initialized. Use async context manager."
+            )
         return await self._make_request(image_data, file_name)
 
     async def recognize_batch_async(
@@ -182,7 +211,9 @@ class OCRClient:
             List of OCRResult objects in the same order as input
         """
         if not self._session:
-            raise RuntimeError("Client session not initialized. Use async context manager.")
+            raise RuntimeError(
+                "Client session not initialized. Use async context manager."
+            )
 
         if file_names and len(file_names) != len(images):
             raise ValueError("file_names must match length of images if provided")
@@ -201,19 +232,107 @@ class OCRClient:
 
         return await asyncio.gather(*tasks)
 
-    async def _process_file(self, file_path: Path, file_name: Optional[str] = None) -> OCRResult:
+    async def _process_file(
+        self, file_path: Path, file_name: Optional[str] = None
+    ) -> OCRResult:
         """Helper method to process a file path"""
         try:
             with open(file_path, "rb") as f:
                 return await self.recognize_async(f, file_name or file_path.name)
         except Exception as e:
             return OCRResult(
-                text="", success=False, error=str(e), file_name=file_name or str(file_path)
+                text="",
+                success=False,
+                error=str(e),
+                file_name=file_name or str(file_path),
             )
+
+    async def _make_document_request(
+        self,
+        image_data: Union[bytes, BinaryIO],
+        file_name: Optional[str] = None,
+        attempt: int = 1,
+    ) -> DocumentOCRResult:
+        """
+        Internal method to make a single document OCR request with retries.
+
+        Args:
+            image_data: Image data as bytes or file-like object
+            file_name: Optional name of the file for identification
+            attempt: Current attempt number (for retries)
+
+        Returns:
+            DocumentOCRResult with the artifact ZIP bytes on success
+        """
+        start_time = time.time()
+        result = DocumentOCRResult(success=False, file_name=file_name)
+
+        try:
+            if isinstance(image_data, io.IOBase):
+                image_data.seek(0)
+                image_bytes = image_data.read()
+            else:
+                image_bytes = image_data
+
+            data = aiohttp.FormData()
+            data.add_field(
+                "file",
+                image_bytes,
+                filename=file_name or "image.jpg",
+                content_type="application/octet-stream",
+            )
+
+            async with self._session.post(
+                f"{self.base_url}/ocr/document", params=dict(lang=self.lang), data=data
+            ) as response:
+                if (
+                    response.status == 200
+                    and response.content_type == "application/zip"
+                ):
+                    result.zip_data = await response.read()
+                    result.success = True
+                else:
+                    error_text = (await response.text())[:200]
+                    result.error = f"HTTP {response.status}: {error_text}"
+
+        except Exception as e:
+            result.error = str(e)
+            if attempt <= self.retries:
+                logger.warning(
+                    f"Attempt {attempt} failed for {file_name or 'image'}. Retrying..."
+                )
+                await asyncio.sleep(1 * attempt)
+                return await self._make_document_request(
+                    image_data, file_name, attempt + 1
+                )
+
+        result.processing_time = time.time() - start_time
+        return result
+
+    async def recognize_document_async(
+        self, image_data: Union[bytes, BinaryIO], file_name: Optional[str] = None
+    ) -> DocumentOCRResult:
+        """
+        Recognize document structure (tables, paragraphs, lists) from a single image.
+
+        Args:
+            image_data: Image data as bytes or file-like object
+            file_name: Optional name of the file for identification
+
+        Returns:
+            DocumentOCRResult with the artifact ZIP bytes on success
+        """
+        if not self._session:
+            raise RuntimeError(
+                "Client session not initialized. Use async context manager."
+            )
+        return await self._make_document_request(image_data, file_name)
 
     # Synchronous wrappers for convenience
     def recognize(
-        self, image_data: Union[bytes, BinaryIO, str, Path], file_name: Optional[str] = None
+        self,
+        image_data: Union[bytes, BinaryIO, str, Path],
+        file_name: Optional[str] = None,
     ) -> OCRResult:
         """
         Synchronous version of recognize_async.
@@ -223,7 +342,9 @@ class OCRClient:
         if isinstance(image_data, (str, Path)):
             image_path = Path(image_data)
             with open(image_path, "rb") as f:
-                return self._run_sync(self.recognize_async(f.read(), file_name or image_path.name))
+                return self._run_sync(
+                    self.recognize_async(f.read(), file_name or image_path.name)
+                )
         else:
             if isinstance(image_data, io.IOBase):
                 image_data.seek(0)
@@ -242,6 +363,31 @@ class OCRClient:
         """
         self._ensure_async_init()
         return self._run_sync(self.recognize_batch_async(images, file_names))
+
+    def recognize_document(
+        self,
+        image_data: Union[bytes, BinaryIO, str, Path],
+        file_name: Optional[str] = None,
+    ) -> DocumentOCRResult:
+        """
+        Synchronous version of recognize_document_async.
+        """
+        self._ensure_async_init()
+
+        if isinstance(image_data, (str, Path)):
+            image_path = Path(image_data)
+            with open(image_path, "rb") as f:
+                return self._run_sync(
+                    self.recognize_document_async(
+                        f.read(), file_name or image_path.name
+                    )
+                )
+        if isinstance(image_data, io.IOBase):
+            image_data.seek(0)
+            image_bytes = image_data.read()
+        else:
+            image_bytes = image_data
+        return self._run_sync(self.recognize_document_async(image_bytes, file_name))
 
     def _run_sync(self, coro):
         """Run an async coroutine synchronously"""

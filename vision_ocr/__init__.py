@@ -1,1 +1,1 @@
-from .client import OCRClient, OCRResult
+from .client import DocumentOCRResult, OCRClient, OCRResult
